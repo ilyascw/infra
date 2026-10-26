@@ -80,5 +80,6 @@ infra/
 ├── redis/                   # Redis compose
 ├── proxy/                   # Traefik compose
 ├── logging/                 # Loki, Promtail, Grafana
+├── architecture/            # C4 model + architecture rules (aact), see architecture/README.md
 └── erd.drawio               # data model diagram
 ```

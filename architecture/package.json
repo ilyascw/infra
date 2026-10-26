@@ -1,0 +1,19 @@
+{
+  "name": "pingtower-architecture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "aact check",
+    "model": "aact model",
+    "test": "node tests/rules.test.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "aact": "3.0.1",
+    "typescript": "5.6.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

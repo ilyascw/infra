@@ -1,0 +1,98 @@
+@startuml pingtower
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_LEFT_RIGHT()
+
+' PingTower — C4 container view of the intended architecture.
+' Sources: .github/profile/README.md, infra/README.md,
+' infra/rabbitmq/config/definitions.json and each service's README
+' (In / Out / Storage table), docker-compose.yml and .env.example.
+'
+' Conventions:
+'   - Rel points from the dependent to the dependency (who calls or connects
+'     to what), not along the data flow.
+'   - RabbitMQ channels are ContainerQueue. A topic exchange is one element;
+'     the consumer's own queue goes into the technology field of its Rel.
+'     Publishers and consumers both point at the channel, so the broker never
+'     creates false cycles.
+'   - Redis is one instance with a logical db per service, so it is three
+'     ContainerDb elements.
+'   - Tags read by the rules (rules/*.ts):
+'       service                       a PingTower service
+'       owner:<svc> / reader:<svc>    on a store: full access / read-only
+'       publisher:<svc> / consumer:<svc>   on a channel
+'       read / write / readwrite      on a Rel to a store
+'       publish / consume             on a Rel to a channel
+'   - Traefik only routes Grafana and the RabbitMQ UI; users reach the api
+'     through nginx in frontend, so Traefik is not shown.
+
+Person(user, "User", "Monitors availability of their servers")
+
+System_Boundary(pingtower, "PingTower") {
+
+    Container(frontend, "frontend", "React 19, nginx", "Dashboard; nginx proxies /api and /hubs to api", $tags="service")
+    Container(api, "api", "C#, ASP.NET Core 10", "REST, SignalR status hub, auth, notification routing", $tags="service")
+
+    Container(ping_service, "ping-service", "Go", "HTTP/HTTPS, TCP, ICMP probes, one goroutine per target", $tags="service")
+    Container(state_elevator, "state-elevator", "C#, Worker Service", "Failure and latency thresholds → UP / DOWN", $tags="service")
+    Container(metrics_writer, "metrics-writer", "C#, Worker Service", "Batched ping history writes to ClickHouse", $tags="service")
+
+    Container(email_service, "email-service", "C#, Worker Service", "SMTP with retries and a circuit breaker", $tags="service")
+    Container(tg_bot, "tg-bot", "Python, aiogram, FastStream", "Account linking and alert delivery to Telegram", $tags="service")
+
+    System_Boundary(infra, "infra") {
+        ContainerDb(postgres, "PostgreSQL", "PostgreSQL 14", "Users, servers, ping and notification settings; schema owned by api migrations", $tags="owner:api")
+        ContainerDb(clickhouse, "ClickHouse", "ClickHouse 24.8", "server_pings: ping history, 30-day TTL; table created by clickhouse-init", $tags="owner:metrics_writer,reader:api")
+        ContainerDb(redis_api, "Redis db0 · api", "Redis 7", "Notification cooldowns", $tags="owner:api")
+        ContainerDb(redis_state, "Redis db1 · state-elevator", "Redis 7", "Server config and runtime state", $tags="owner:state_elevator")
+        ContainerDb(redis_ping, "Redis db2 · ping-service", "Redis 7", "Probe targets", $tags="owner:ping_service")
+
+        ContainerQueue(server_events, "serverEventsExchange", "RabbitMQ topic", "server.target.added / updated / deleted", $tags="publisher:api,consumer:ping_service,consumer:state_elevator")
+        ContainerQueue(ping_events, "pingEventsExchange", "RabbitMQ topic", "server.ping.recorded", $tags="publisher:ping_service,consumer:state_elevator,consumer:metrics_writer")
+        ContainerQueue(status_events, "statusEventsExchange", "RabbitMQ topic", "server.status.changed", $tags="publisher:state_elevator,consumer:api")
+        ContainerQueue(email_queue, "emailQueue", "RabbitMQ work queue", "Emails", $tags="publisher:api,consumer:email_service")
+        ContainerQueue(telegram_queue, "telegramQueue", "RabbitMQ work queue", "Telegram messages", $tags="publisher:api,consumer:tg_bot")
+    }
+}
+
+System_Ext(smtp, "SMTP", "Mail server")
+System_Ext(telegram, "Telegram Bot API")
+
+' Layout: LAYOUT_LEFT_RIGHT with no manual hints.
+' Do not use Rel_Back: aact reads it as a relation in the opposite direction.
+
+' --- User entry ---
+Rel(user, frontend, "Uses", "HTTPS")
+Rel(frontend, api, "Proxies /api and /hubs", "HTTP, WebSocket")
+
+' --- Stores ---
+Rel(api, postgres, "Reads and writes", "EF Core", $tags="readwrite")
+Rel(api, clickhouse, "Reads ping history", "ClickHouse HTTP", $tags="read")
+Rel(api, redis_api, "Notification cooldowns", "Redis", $tags="readwrite")
+Rel(metrics_writer, clickhouse, "Bulk inserts pings", "ClickHouse HTTP", $tags="write")
+Rel(state_elevator, redis_state, "Config and state", "Redis", $tags="readwrite")
+Rel(ping_service, redis_ping, "Probe targets", "Redis", $tags="readwrite")
+
+' --- Channels: publishers ---
+Rel(api, server_events, "publishes", "server.target.*", $tags="publish")
+Rel(api, email_queue, "publishes", "AMQP", $tags="publish")
+Rel(api, telegram_queue, "publishes", "AMQP", $tags="publish")
+Rel(ping_service, ping_events, "publishes", "server.ping.recorded", $tags="publish")
+Rel(state_elevator, status_events, "publishes", "server.status.changed", $tags="publish")
+
+' --- Channels: consumers (technology = the consumer's queue) ---
+Rel(ping_service, server_events, "consumes", "q.ping-service.server-events", $tags="consume")
+Rel(state_elevator, server_events, "consumes", "q.state-elevator.server-events", $tags="consume")
+Rel(state_elevator, ping_events, "consumes", "q.state-elevator.ping-events", $tags="consume")
+Rel(metrics_writer, ping_events, "consumes", "q.metrics-writer.ping-events", $tags="consume")
+Rel(api, status_events, "consumes", "q.api.status-events", $tags="consume")
+Rel(email_service, email_queue, "consumes", "emailQueue", $tags="consume")
+Rel(tg_bot, telegram_queue, "consumes", "telegramQueue", $tags="consume")
+
+' --- External systems ---
+Rel(email_service, smtp, "Sends emails", "SMTP")
+Rel(tg_bot, telegram, "Sends messages, receives webhook", "HTTPS")
+
+SHOW_LEGEND()
+
+@enduml
